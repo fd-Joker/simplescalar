@@ -2,12 +2,12 @@
 
 /* define enumerate type for ALU operation */
 enum alu_op {
-	ALU_ADD, ALU_SUB, ALU_AND, ALU_OR, ALU_SLT, ALU_SHL
+	ALU_ADD, ALU_SUB, ALU_AND, ALU_OR, ALU_SLT, ALU_SHL, ALU_MULTU
 };
 
 /* define branch signal type */
 enum branch_sig {
-	B_NONE, B_J, B_NE
+	B_NONE, B_J, B_NE, B_EQ
 };
 
 /* deifine values of signal */
@@ -122,8 +122,9 @@ void do_wb();
  * macros for debug
  */
 #define SP_DEBUG
+#undef SP_DEBUG
 #ifdef SP_DEBUG
-#define PRINT_CYCLE(cycle) fprintf(stderr, "Current Cycle: %d\n", cycle)
+#define PRINT_CYCLE(cycle) //fprintf(stderr, "Current Cycle: %d\n", cycle)
 #define PRINT_REG(file, reg) fprintf(file, "r[%d]=%d\n", reg, GPR(reg))
 #define PRINT_FD(file) fprintf(file, "IN IF/ID:\n\tPC: %x\n", fd.PC)
 #define PRINT_DE(file) fprintf(file, "IN ID/EX:\n\tPC: %x data_1: %d data_2: %d imm: %d\n", \
@@ -148,7 +149,7 @@ void do_wb();
 	PRINT_MW(file);\
 	PRINT_MW_SIG(file);\
 }
-#define PRINT_INFO(file, MSG) fprintf(file, MSG);
+#define PRINT_INFO(file, MSG) fprintf(file, MSG)
 #define PRINT_FORWARDING_SIG(file, sig_1, sig_2) fprintf(file, "IN do forwarding, set_sig_1: %d set_sig_2: %d\n", sig_1, sig_2)
 #else
 #define PRINT_CYCLE(cycle)

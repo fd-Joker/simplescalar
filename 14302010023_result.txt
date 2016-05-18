@@ -1,0 +1,6 @@
+Clock Cycle: 7897427
+Cache Access: 1048576
+Cache Hit: 757319
+Cache Miss: 291257
+Cache Replacement: 291193
+Cache Write Back: 17187

@@ -17,6 +17,7 @@
 #include "dlite.h"
 #include "sim.h"
 #include "sim-pipe.h"
+#include "with-cache.h"
 
 /* simulated registers */
 static struct regs_t regs;
@@ -210,6 +211,8 @@ sim_uninit(void)
 
 /* count the total number of cycle */
 int count_cycle = 0;
+/* cache running parameter */
+int cache_access = 0, cache_replacement = 0, cache_writeback = 0, cache_hit = 0, cache_miss = 0;
 /* print pipeline state */
 void dump_pipeline(FILE *f) {
 	enum md_fault_type _fault;
@@ -226,11 +229,29 @@ void dump_pipeline(FILE *f) {
 	md_print_insn(em.inst, em.PC, f);
 	fprintf(f, "\n[WB] ");
 	md_print_insn(mw.inst, mw.PC, f);
-	fprintf(f, "\n[REGS] r[2]=%d r[3]=%d r[4]=%d r[5]=%d r[6]=%d mem=%d\n", 
-			GPR(2), GPR(3), GPR(4), GPR(5), GPR(6), READ_WORD(16+GPR(30), _fault));
+	fprintf(f, "\n[REGS] r[2]=%d r[3]=%d r[4]=%d r[5]=%d r[6]=%d r[7]=%d r[8]=%d r[9]=%d r[10]=%d\nr[12]=%d r[13]=%d r[14]=%d r[15]=%d r[16]=%d r[20]=%d r[21]=%d r[22]=%d HI=%d LO=%d mem=%d\n", 
+			GPR(2), GPR(3), GPR(4), GPR(5), GPR(6), GPR(7), GPR(8), GPR(9), GPR(10), GPR(12), GPR(13), GPR(14), GPR(15), GPR(16), GPR(20), GPR(21), GPR(22), GPR(DHI), GPR(DLO), READ_WORD(16+GPR(30), _fault));
 	// FIXME: debug
 	PRINT_REG(f, 29);
 	fprintf(f, "-------------------------------------------------------------\n");
+}
+
+/* print cache result */
+void print_cache(FILE *f) {
+	fprintf(f, "Clock Cycle: %d\n", count_cycle);
+	fprintf(f, "Cache Access: %d\n", cache_access);
+	fprintf(f, "Cache Hit: %d\n", cache_hit);
+	fprintf(f, "Cache Miss: %d\n", cache_miss);
+	fprintf(f, "Cache Replacement: %d\n", cache_replacement);
+	fprintf(f, "Cache Write Back: %d\n", cache_writeback);
+}
+
+/* print memory trace */
+void print_mem_trace(FILE *f, md_addr_t addr, char option, int flag) {
+	fprintf(f, "%c", option);
+	fprintf(f, " %x", addr);
+	fprintf(f, flag ? " hit" : " miss");
+	fprintf(f, "\n");
 }
 
 #define REG_HAZARD(READ_PORT, WRITE_PORT) ((READ_PORT != 0) && (READ_PORT == WRITE_PORT))
@@ -286,9 +307,10 @@ void do_bubble() {
  */
 void do_stall() {
 	// FIXME: debug
-	fprintf(stdout, "[DEBUG]In do stall de.in1: %d, de.in2: %d, em.regDst: %d mw.regwrite: %d if cond: %d\n", 
-			de.oprand.in1, de.oprand.in2, em.regDst, mw.signal.regwrite, ((mw.signal.regwrite && (REG_HAZARD(de.oprand.in1, mw.regDst) || REG_HAZARD(de.oprand.in2, mw.regDst)))));
-	if ((em.signal.regwrite && em.signal.memtoreg && (REG_HAZARD(de.oprand.in1, em.regDst) || REG_HAZARD(de.oprand.in2, em.regDst)))) {
+//	fprintf(stdout, "[DEBUG]In do stall de.in1: %d, de.in2: %d, em.regDst: %d mw.regwrite: %d if cond: %d\n", 
+//			de.oprand.in1, de.oprand.in2, em.regDst, mw.signal.regwrite, ((mw.signal.regwrite && (REG_HAZARD(de.oprand.in1, mw.regDst) || REG_HAZARD(de.oprand.in2, mw.regDst)))));
+	if ((em.signal.regwrite && em.signal.memtoreg && (REG_HAZARD(de.oprand.in1, em.regDst) || REG_HAZARD(de.oprand.in2, em.regDst)))
+			/*|| (mw.signal.regwrite && (REG_HAZARD(de.oprand.in1, mw.regDst) || REG_HAZARD(de.oprand.in2, mw.regDst)))*/) {
 		PRINT_INFO(stdout, "[DEBUG]IN do stall\n");
 		fd.inst = de.inst;
 		fd.PC = de.PC;
@@ -296,6 +318,7 @@ void do_stall() {
 		de.opcode = NOP;
 		SET_CONSIG(ALU_ADD, 0, 0, 0, B_NONE, 0, 0, 0);
 	}
+
 }
 void do_forward() {
 	if (mw.signal.regwrite && REG_HAZARD(de.oprand.in1, mw.regDst))
@@ -306,6 +329,129 @@ void do_forward() {
 		de.reg_data_1 = em.signal.memtoreg ? de.reg_data_1/* can not forward */ : em.ALUresult;
 	if (em.signal.regwrite && REG_HAZARD(de.oprand.in2, em.regDst))
 		de.reg_data_2 = em.signal.memtoreg ? de.reg_data_2/* can not forward */ : em.ALUresult;
+}
+
+/* switch to control whether to use cache */
+int use_cache = 1;
+cache_set_t cache[CSET];
+
+void evict_cache(int set_ndx) {
+	enum md_fault_type _fault;
+	/* cache replaced */
+	cache_replacement++;
+	cache_line_t *old_head = cache[set_ndx].first;
+	cache_line_t *new_head = old_head->next;
+	PRINT_INFO(stderr, "Before evict\n");
+	/* write back */
+	if (old_head->dirty) {
+		/* cache write back */
+		cache_writeback++;
+		#ifdef SIMULATE_MEM
+		int block;
+		for (block = 0; block < CACHE_BLOCK_COUNT; block++) {
+			word_t data = old_head->data[block];
+			md_addr_t addr = MADDR(old_head->tag, set_ndx, 4*block);
+			WRITE_WORD(data, addr, _fault);
+		}
+		#endif
+	}
+	PRINT_INFO(stderr, "Debug evict\n");
+	// FIXME: debug when write to memory there is segmentation fault, this bug is still not finished
+//	fprintf(stderr, "set_ndx: %x tag: %x old_head: %x\n", set_ndx, old_head->tag, (int)old_head);
+	free(old_head);
+	cache[set_ndx].first = new_head;
+	PRINT_INFO(stderr, "After evict\n");
+}
+
+/**
+ * load memory to cache
+ * return the cache line of addr
+ */
+cache_line_t *load_cache(int *fp, md_addr_t addr) {
+	int tag = GET_TAG(addr);
+	int set_ndx = GET_SET_NDX(addr);
+	cache_line_t *ret;
+	/**
+	 * search cache
+	 */
+	int count_line = 0;
+	cache_line_t *prev = NULL;
+	cache_line_t *curr = cache[set_ndx].first;
+	while (curr) {
+		/* cache hit */
+		if (curr->valid && curr->tag == tag) { // cache hit
+			cache_hit++;
+			*fp = 1;
+			ret = curr;
+			return ret;
+		}
+		prev = curr;
+		curr = curr->next;
+		count_line++;
+	}
+	/**
+	 * cache miss and load cache
+	 */
+	cache_miss++;
+	*fp = 0;
+	ret = (cache_line_t *)malloc(sizeof(cache_line_t));
+	memset(ret, 0, sizeof(cache_line_t));
+#ifdef SIMULATE_MEM
+	int block;
+	enum md_fault_type _fault;
+	for (block = 0; block < CACHE_BLOCK_COUNT; block++) {
+		md_addr_t block_addr = MADDR(tag, set_ndx, 4*block);
+		ret->data[block] = READ_WORD(block_addr, _fault);
+	}
+#endif
+	ret->tag = tag;
+	ret->dirty = 0;
+	ret->valid = 1;
+	ret->ref_count = 1;
+	ret->next = NULL;
+	/* add the new line to cache */
+	if (prev != NULL)
+		prev->next = ret;
+	else
+		cache[set_ndx].first = ret;
+	/* evict cache FIFO */
+	if (count_line == WAY)
+		evict_cache(set_ndx);
+	return ret;
+}
+
+FILE *f_trace;
+/**
+ * read word function for simulation with cache 
+ * return 1 if hit and 0 if miss
+ */
+int readw(word_t *data, md_addr_t addr) {
+	cache_access++;
+	int flag;
+	cache_line_t *line = load_cache(&flag, addr);
+	print_mem_trace(f_trace, addr, 'L', flag);
+	#ifdef SIMULATE_MEM
+	int ofs = GET_OFFSET(addr);
+	*data = line->data[ofs];
+	#endif
+	return flag;
+}
+
+/**
+ * write word function for simulation with cache 
+ * return 1 if hit and 0 if miss
+ */
+int writew(word_t data, md_addr_t addr) {
+	cache_access++;
+	int flag;
+	cache_line_t *line = load_cache(&flag, addr);
+	line->dirty = 1;
+	print_mem_trace(f_trace, addr, 'S', flag);
+	#ifdef SIMULATE_MEM
+	int ofs = GET_OFFSET(addr);
+	line->data[ofs] = data;
+	#endif
+	return flag;
 }
 
 /* start simulation, program loaded, processor precise state initialized */
@@ -323,7 +469,8 @@ sim_main(void)
   /* maintain $r0 semantics */
   regs.regs_R[MD_REG_ZERO] = 0;
  
-	/* test git */
+	/* open memory trace file */
+	f_trace = fopen("cache_trace.txt", "w");
 
 	/* initialize fd.PC */
 	fd.PC = regs.regs_PC - sizeof(md_inst_t);
@@ -331,9 +478,9 @@ sim_main(void)
   {
 		/* FIXME: debug */
 		PRINT_PIPELINE(stdout);
-		dump_pipeline(stdout);
 		do_forward();
 		do_stall();
+//		dump_pipeline(stdout);
 		do_wb();
 		do_mem();
 		do_ex();
@@ -343,12 +490,15 @@ sim_main(void)
 		PRINT_CYCLE(count_cycle);
 		count_cycle++;
 
-		if (MD_OPFIELD(mw.dumped_inst) == SYSCALL)
+		if (MD_OPFIELD(mw.dumped_inst) == SYSCALL) {
+			print_cache(stdout);
 			SYSCALL(mw.dumped_inst);
+		}
 
 		if (MD_OPFIELD(mw.dumped_inst) != NOP)
 			INC_INSN_CTR();
   }
+	fclose(f_trace);
 }
 
 void do_if()
@@ -413,6 +563,8 @@ READ_OPRAND_VALUE:
 			SET_CONSIG(ALU_ADD, 0, 1, 1, B_NONE, 0, 0, 0);break;
 		case ADDU:
 			SET_CONSIG(ALU_ADD, 0, 1, 1, B_NONE, 0, 0, 0);break;
+		case ADDI:
+			SET_CONSIG(ALU_ADD, 1, 1, 0, B_NONE, 0, 0, 0);break;
 		case ADDIU:
 			SET_CONSIG(ALU_ADD, 1, 1, 0, B_NONE, 0, 0, 0);break;
 		case SLTI:
@@ -425,10 +577,16 @@ READ_OPRAND_VALUE:
 			SET_CONSIG(ALU_ADD, 1, 1, 0, B_NONE, 0, 1, 1);break;
 		case BNE:
 			SET_CONSIG(ALU_SLT, 0, 0, 0, B_NE, 0, 0, 0);break;
+		case BEQ:
+			SET_CONSIG(ALU_SLT, 0, 0, 0, B_EQ, 0, 0, 0);break;
 		case JUMP:
 			SET_CONSIG(ALU_SLT, 0, 0, 0, B_J, 0, 0, 0);break;
 		case SLL:
 			SET_CONSIG(ALU_SHL, 1, 1, 1, B_NONE, 0, 0, 0);break;
+		case MULTU:
+			SET_CONSIG(ALU_MULTU, 0, 0, 0, B_NONE, 0, 0, 0);break;
+		case MFLO:
+			SET_CONSIG(ALU_ADD, 0, 1, 1, B_NONE, 0, 0, 0);break;
 		default:
 			PRINT_INFO(stdout, "IN ID, default branch taken\n");
 			SET_CONSIG(ALU_ADD, 0, 0, 0, B_NONE, 0, 0, 0);
@@ -448,6 +606,13 @@ READ_OPRAND_VALUE:
 				de.imm = 0;
 				de.reg_dst_rt = 0;
 				de.reg_dst_rd = de.oprand.out1;
+				break;
+			case ADDI:
+				de.reg_data_1 = GPR(de.oprand.in1);
+				de.reg_data_2 = 0;
+				de.imm = IMM;
+				de.reg_dst_rt = de.oprand.out1;;
+				de.reg_dst_rd = 0;
 				break;
 			case ADDIU:
 				de.reg_data_1 = GPR(de.oprand.in1);
@@ -484,7 +649,13 @@ READ_OPRAND_VALUE:
 				de.reg_dst_rd = 0;
 				break;
 			case LW:
-				de.reg_data_1 = GPR(de.oprand.in2); // GPR(BS)
+				// FIXME: reg_data_1 and reg_data_2 are twisted
+				{
+					int tmp = de.oprand.in1;
+					de.oprand.in1 = de.oprand.in2;
+					de.oprand.in2 = tmp;
+				}
+				de.reg_data_1 = GPR(de.oprand.in1); // GPR(BS)
 				de.reg_data_2 = 0; // GPR(RT)
 				de.imm = UIMM;
 				de.reg_dst_rt = de.oprand.out1;
@@ -493,7 +664,14 @@ READ_OPRAND_VALUE:
 			case BNE:
 				de.reg_data_1 = GPR(de.oprand.in1);
 				de.reg_data_2 = GPR(de.oprand.in2);
-				de.imm = UIMM;
+				de.imm = OFS;
+				de.reg_dst_rt = 0;
+				de.reg_dst_rd = 0;
+				break;
+			case BEQ:
+				de.reg_data_1 = GPR(de.oprand.in1);
+				de.reg_data_2 = GPR(de.oprand.in2);
+				de.imm = OFS;
 				de.reg_dst_rt = 0;
 				de.reg_dst_rd = 0;
 				break;
@@ -508,6 +686,20 @@ READ_OPRAND_VALUE:
 				de.reg_data_1 = GPR(de.oprand.in1);
 				de.reg_data_2 = 0;
 				de.imm = UIMM;
+				de.reg_dst_rt = 0;
+				de.reg_dst_rd = de.oprand.out1;
+				break;
+			case MULTU:
+				de.reg_data_1 = GPR(de.oprand.in1);
+				de.reg_data_2 = GPR(de.oprand.in2);
+				de.imm = 0;
+				de.reg_dst_rt = de.oprand.out1;
+				de.reg_dst_rd = de.oprand.out2;
+				break;
+			case MFLO:
+				de.reg_data_1 = GPR(DLO);
+				de.reg_data_2 = 0;
+				de.imm = 0;
 				de.reg_dst_rt = 0;
 				de.reg_dst_rd = de.oprand.out1;
 				break;
@@ -573,7 +765,7 @@ void do_ex()
 			break;
 		case ALU_SLT:
 			// FIXME: debug
-			fprintf(stdout, "[debug]IN ALU, SLT oprand_1: %d oprand_2: %d\n", oprand_1, oprand_2);
+//			fprintf(stdout, "[debug]IN ALU, SLT oprand_1: %d oprand_2: %d\n", oprand_1, oprand_2);
 			em.ALUresult = oprand_1 - oprand_2;
 			em.zero = em.ALUresult ? 0 : 1;
 			em.ALUresult = em.ALUresult >> 31;			/* semantic of set on less than */
@@ -582,6 +774,13 @@ void do_ex()
 			em.ALUresult = oprand_1 << oprand_2;
 			em.zero = 0;
 			break;
+		case ALU_MULTU:
+		{
+			unsigned long tmp = ((unsigned long) oprand_1) * ((unsigned long) oprand_2);
+			HI = (unsigned int)(tmp >> 32);
+			LO = (unsigned int)(tmp & 0xFFFFFFFF);
+			break;
+		}
 	}
 	/**
 	 * compute TPC
@@ -593,9 +792,13 @@ void do_ex()
 			em.PCsrc = 1;
 			break;
 		case B_NE:
-			PRINT_INFO(stdout, "[DEBUG]IN EX, BNE\n")
+			PRINT_INFO(stdout, "[DEBUG]IN EX, BNE\n");
 			em.TPC = de.PC + sizeof(md_inst_t) + SHL2(de.imm);
 			em.PCsrc = !(em.zero);
+			break;
+		case B_EQ:
+			em.TPC = de.PC + sizeof(md_inst_t) + SHL2(de.imm);
+			em.PCsrc = em.zero;
 			break;
 		default:
 			em.PCsrc = 0;
@@ -630,12 +833,34 @@ void do_mem()
 	word_t data;
 	if (em.signal.memwrite) {
 		PRINT_INFO(stdout, "[debug]IN MEM, write\n");
+		// FIXME: debug
+//		fprintf(stdout, "addr: %x\n", addr);
 	  data = em.reg_to_mem;
-		WRITE_WORD(data, addr, _fault);
+		if (use_cache) {
+			if (!writew(data, addr))
+				count_cycle += 9;
+		}
+		else {
+			// FIXME: debug
+//			fprintf(stdout, "addr: %x\n", addr);
+			WRITE_WORD(data, addr, _fault);
+			count_cycle += 9;
+		}
 	}
 	if (em.signal.memread) {
 		PRINT_INFO(stdout, "[debug]IN MEM, read\n");
-		data = READ_WORD(addr, _fault);
+		// FIXME: debug
+//		fprintf(stdout, "addr: %x\n", addr);
+		if (use_cache) {
+			if (!readw(&data, addr))
+				count_cycle += 9;
+		}
+		else {
+			// FIXME: debug
+//			fprintf(stdout, "addr: %x\n", addr);
+			data = READ_WORD(addr, _fault);
+			count_cycle += 9;
+		}
 		mw.mem_data = data;
 	}
 }

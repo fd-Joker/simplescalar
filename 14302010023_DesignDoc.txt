@@ -1,0 +1,21 @@
+###Cache
+	Cache is designed as an array of cache_set_t.
+	cache_set_t is a struct that contains a pointer to the first line in this cache set
+	cache_line_t is a struct that encapsulate the valid bit, tag, dirty bit, reference count and an array of data in the block.
+	cache_line_t also contains a pointer to the next cache_line_t
+###Cache Load
+	First, the function load_cache() gets the tag, and set index of the address.
+	Second, it searches the cache for a hit.
+	Third, when cache hit, it returns the hit cache_line
+	Forth, when cache miss, it read from memory to load a new cache_line
+	Fifth, the symbol SIMULATE_MEM is used to control whether to simulate real memory read. There is a bug if the symbol is set.
+	Finally, the function tests if the cache set is full. If so, do evict_cache()
+###FIFO(First In First Out)
+	The replacement policy is reflected in the function evict_cache(). The line to be evicted is the first in the list of cache_line_t.
+###Signal
+	1. use_cache
+		to control whether to use cache
+	2. SIMULATE_MEM
+		to control whether to read memory
+	3. SP_DEBUG
+		to control whether to print debug information
